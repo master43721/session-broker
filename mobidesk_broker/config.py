@@ -14,25 +14,43 @@ from urllib.parse import urlparse
 _SCOPE_RE = re.compile(r"^[A-Za-z0-9_.-]{1,32}$")
 
 
+_IPV4_ALLOWED_NETWORKS = tuple(
+    ipaddress.ip_network(value)
+    for value in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16")
+)
+_IPV6_ULA = ipaddress.ip_network("fc00::/7")
+_IPV6_LINK_LOCAL = ipaddress.ip_network("fe80::/10")
+
+
 def validate_vm_endpoint(host: str) -> str:
-    """Accept only private IP literals; link-local IPv6 requires an interface scope."""
-    if not isinstance(host, str) or not host or host.strip() != host:
+    """Accept RFC1918 IPv4, IPv6 ULA, or scoped IPv6 link-local only."""
+    if not isinstance(host, str) or not host or host.strip() != host or host.count("%") > 1:
         raise ValueError("VM endpoint must be a non-empty IP literal")
+
     address_text, separator, scope = host.partition("%")
     try:
         address = ipaddress.ip_address(address_text)
     except ValueError as exc:
         raise ValueError("VM endpoint must be an IP literal, not a hostname") from exc
 
-    if address.is_loopback or address.is_unspecified or address.is_multicast:
+    if address.is_loopback or address.is_unspecified or address.is_multicast or address.is_reserved:
         raise ValueError("VM endpoint is not an allowed private address")
-    if not (address.is_private or address.is_link_local):
-        raise ValueError("VM endpoint must be private or link-local")
-    if address.version == 6 and address.is_link_local and not separator:
+
+    if address.version == 4:
+        allowed = any(address in network for network in _IPV4_ALLOWED_NETWORKS)
+        if separator or not allowed:
+            raise ValueError("IPv4 VM endpoint must be RFC1918 or link-local")
+        return str(address)
+
+    in_ula = address in _IPV6_ULA
+    in_link_local = address in _IPV6_LINK_LOCAL
+    if in_ula and not separator:
+        return str(address)
+    if in_link_local and separator and _SCOPE_RE.fullmatch(scope):
+        return f"{address}%{scope}"
+    if in_link_local and not separator:
         raise ValueError("Link-local IPv6 endpoint requires an interface scope")
-    if separator and (address.version != 6 or not address.is_link_local or not _SCOPE_RE.fullmatch(scope)):
-        raise ValueError("Invalid IPv6 interface scope")
-    return host
+    raise ValueError("IPv6 VM endpoint must be ULA or scoped link-local")
 
 
 @dataclass(frozen=True)
@@ -51,11 +69,18 @@ class BrokerConfig:
     max_session_seconds: int = 14_400
     idle_timeout_seconds: int = 1_800
     max_sessions: int = 5
+    max_pending_grants: int = 10
 
     def __post_init__(self) -> None:
         if not isinstance(self.vm_endpoints, Mapping):
             raise ValueError("VM endpoint allowlist must be a mapping")
-        object.__setattr__(self, "vm_endpoints", MappingProxyType(dict(self.vm_endpoints)))
+        normalized: dict[str, str] = {}
+        for raw_id, endpoint in self.vm_endpoints.items():
+            normalized_id = str(uuid.UUID(str(raw_id)))
+            if normalized_id in normalized:
+                raise ValueError("VM endpoint IDs must be unique after UUID normalization")
+            normalized[normalized_id] = validate_vm_endpoint(endpoint)
+        object.__setattr__(self, "vm_endpoints", MappingProxyType(normalized))
         self.validate()
 
     def validate(self) -> None:
@@ -106,6 +131,8 @@ class BrokerConfig:
             raise ValueError("Idle timeout must be between 1 second and 24 hours")
         if not 1 <= self.max_sessions <= 5:
             raise ValueError("Maximum concurrent sessions must be between 1 and 5")
+        if not self.max_sessions <= self.max_pending_grants <= 50:
+            raise ValueError("Maximum pending grants must be between max sessions and 50")
 
     @classmethod
     def from_env(cls) -> "BrokerConfig":
@@ -127,4 +154,14 @@ class BrokerConfig:
             vm_endpoints=endpoints,
             bind_host=os.environ.get("MOBIDESK_BIND_HOST", "127.0.0.1").strip(),
             port=int(os.environ.get("MOBIDESK_PORT", "8766")),
+            grant_ttl_seconds=int(os.environ.get("MOBIDESK_GRANT_TTL_SECONDS", "60")),
+            grant_cooldown_seconds=float(os.environ.get("MOBIDESK_GRANT_COOLDOWN_SECONDS", "2")),
+            connect_timeout_seconds=float(os.environ.get("MOBIDESK_CONNECT_TIMEOUT_SECONDS", "5")),
+            supabase_timeout_seconds=float(os.environ.get("MOBIDESK_SUPABASE_TIMEOUT_SECONDS", "8")),
+            heartbeat_seconds=int(os.environ.get("MOBIDESK_HEARTBEAT_SECONDS", "20")),
+            max_message_bytes=int(os.environ.get("MOBIDESK_MAX_MESSAGE_BYTES", "1048576")),
+            max_session_seconds=int(os.environ.get("MOBIDESK_MAX_SESSION_SECONDS", "14400")),
+            idle_timeout_seconds=int(os.environ.get("MOBIDESK_IDLE_TIMEOUT_SECONDS", "1800")),
+            max_sessions=int(os.environ.get("MOBIDESK_MAX_SESSIONS", "5")),
+            max_pending_grants=int(os.environ.get("MOBIDESK_MAX_PENDING_GRANTS", "10")),
         )

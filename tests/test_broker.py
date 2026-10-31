@@ -9,7 +9,7 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from mobidesk_broker.app import create_app
 from mobidesk_broker.config import BrokerConfig, validate_vm_endpoint
-from mobidesk_broker.grants import GrantStore
+from mobidesk_broker.grants import GrantCapacityExceeded, GrantStore
 from mobidesk_broker.supabase_api import InvalidAccessToken
 
 
@@ -217,6 +217,14 @@ class GrantStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(await store.consume(raw))
         self.assertIsNone(stored_grant.access_token)
 
+    async def test_pending_grants_are_globally_bounded(self):
+        store = GrantStore(ttl_seconds=60, max_pending_grants=1, cooldown_seconds=0)
+        raw, _ = await store.issue(USER_ID, VM_ID, "win-01", "token")
+        with self.assertRaises(GrantCapacityExceeded):
+            await store.issue("a55953f1-3166-4714-9c64-ac2440b19e6c", VM_ID, "win-01", "token-2")
+        self.assertEqual(len(store._grants), 1)
+        self.assertIsNotNone(await store.consume(raw))
+
     async def test_new_grant_revokes_previous_pending_grant(self):
         store = GrantStore(ttl_seconds=60, cooldown_seconds=0)
         first, _ = await store.issue(USER_ID, VM_ID, "win-01", "token")
@@ -230,8 +238,12 @@ class EndpointValidationTests(unittest.TestCase):
         self.assertEqual(validate_vm_endpoint("172.16.33.137"), "172.16.33.137")
         self.assertEqual(validate_vm_endpoint("fe80::c44d:f2ee:aca8:652e%br0"), "fe80::c44d:f2ee:aca8:652e%br0")
 
-    def test_public_hostname_and_unscoped_link_local_are_rejected(self):
-        for value in ("rdp.example.com", "8.8.8.8", "fe80::1", "127.0.0.1"):
+    def test_non_private_special_and_public_endpoints_are_rejected(self):
+        for value in (
+            "rdp.example.com", "8.8.8.8", "100.64.0.1", "192.0.2.1",
+            "198.18.0.1", "2001:db8::1", "::ffff:192.168.1.2",
+            "fe80::1", "127.0.0.1",
+        ):
             with self.subTest(value=value):
                 with self.assertRaises(ValueError):
                     validate_vm_endpoint(value)
@@ -251,6 +263,11 @@ class EndpointValidationTests(unittest.TestCase):
                 bind_host="0.0.0.0",
             )
 
+    def test_only_explicit_private_ranges_are_accepted(self):
+        for value in ("10.1.2.3", "172.16.3.4", "192.168.10.20", "169.254.1.2", "fd12::1", "fe80::1%br0"):
+            with self.subTest(value=value):
+                self.assertEqual(validate_vm_endpoint(value), value)
+
     def test_endpoint_mapping_is_copied_and_immutable(self):
         endpoints = {
             VM_ID: "192.168.122.11",
@@ -268,6 +285,20 @@ class EndpointValidationTests(unittest.TestCase):
         self.assertEqual(config.vm_endpoints[VM_ID], "192.168.122.11")
         with self.assertRaises(TypeError):
             config.vm_endpoints[VM_ID] = "8.8.8.8"
+
+    def test_uuid_keys_are_normalized_before_lookup(self):
+        config = BrokerConfig(
+            supabase_url="https://unit-test.supabase.co",
+            supabase_publishable_key="not-a-real-key",
+            vm_endpoints={
+                VM_ID.upper(): "192.168.122.11",
+                OTHER_VM_ID: "192.168.122.12",
+                "00000000-0000-4000-8000-000000000003": "192.168.122.13",
+                "00000000-0000-4000-8000-000000000004": "192.168.122.14",
+                "00000000-0000-4000-8000-000000000005": "192.168.122.15",
+            },
+        )
+        self.assertIn(VM_ID, config.vm_endpoints)
 
 
 if __name__ == "__main__":
