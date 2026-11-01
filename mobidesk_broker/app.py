@@ -10,7 +10,7 @@ import aiohttp
 from aiohttp import WSMsgType, web
 
 from .config import BrokerConfig
-from .grants import Grant, GrantRateLimited, GrantStore, SessionBusy
+from .grants import Grant, GrantCapacityExceeded, GrantRateLimited, GrantStore, SessionBusy
 from .supabase_api import InvalidAccessToken, SupabaseAPI, SupabaseUnavailable
 
 
@@ -75,6 +75,7 @@ def create_app(
     app[GRANT_STORE_KEY] = grant_store or GrantStore(
         ttl_seconds=config.grant_ttl_seconds,
         max_active_sessions=config.max_sessions,
+        max_pending_grants=config.max_pending_grants,
         cooldown_seconds=config.grant_cooldown_seconds,
     )
     app[TCP_CONNECTOR_KEY] = tcp_connector or _default_tcp_connector
@@ -127,6 +128,8 @@ async def create_session_grant(request: web.Request) -> web.Response:
         )
     except GrantRateLimited:
         return web.json_response({"error": "please_wait_before_retrying"}, status=429, headers={"Cache-Control": "no-store", "Retry-After": "2"})
+    except GrantCapacityExceeded:
+        return web.json_response({"error": "broker_temporarily_busy"}, status=503, headers={"Cache-Control": "no-store", "Retry-After": "2"})
     except SessionBusy:
         return web.json_response({"error": "session_limit_reached"}, status=409, headers={"Cache-Control": "no-store"})
 

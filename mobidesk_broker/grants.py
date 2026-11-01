@@ -16,6 +16,10 @@ class GrantRateLimited(Exception):
     pass
 
 
+class GrantCapacityExceeded(Exception):
+    pass
+
+
 @dataclass
 class Grant:
     user_id: str
@@ -32,11 +36,13 @@ class GrantStore:
         self,
         ttl_seconds: int = 60,
         max_active_sessions: int = 5,
+        max_pending_grants: int = 10,
         cooldown_seconds: float = 2.0,
         clock=time.monotonic,
     ) -> None:
         self.ttl_seconds = ttl_seconds
         self.max_active_sessions = max_active_sessions
+        self.max_pending_grants = max_pending_grants
         self.cooldown_seconds = cooldown_seconds
         self.clock = clock
         self._grants: dict[str, Grant] = {}
@@ -75,8 +81,12 @@ class GrantStore:
             if previous_issue is not None and now - previous_issue < self.cooldown_seconds:
                 raise GrantRateLimited
 
-            old_digest = self._user_to_hash.pop(user_id, None)
+            old_digest = self._user_to_hash.get(user_id)
+            pending_after_replacement = len(self._grants) - (1 if old_digest is not None else 0)
+            if pending_after_replacement >= self.max_pending_grants:
+                raise GrantCapacityExceeded
             if old_digest is not None:
+                self._user_to_hash.pop(user_id, None)
                 old_grant = self._grants.pop(old_digest, None)
                 if old_grant is not None:
                     old_grant.access_token = None

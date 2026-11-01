@@ -1,0 +1,31 @@
+[Unit]
+Description=MobiDesk Session Broker
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=mobidesk-broker
+Group=mobidesk-broker
+WorkingDirectory=/opt/mobidesk-session-broker
+EnvironmentFile=/etc/mobidesk-session-broker/broker.env
+ExecStart=/opt/mobidesk-session-broker/.venv/bin/python -m mobidesk_broker.app
+Restart=on-failure
+RestartSec=3
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+MemoryMax=512M
+TasksMax=64
+
+[Install]
+WantedBy=multi-user.target
